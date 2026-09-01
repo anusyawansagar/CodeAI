@@ -2,7 +2,7 @@ const messages = document.getElementById("messages");
 const input = document.getElementById("userInput");
 const language = document.getElementById("language");
 
-const BACKEND_URL = "http://127.0.0.1:8000";
+const BACKEND_URL = "https://codeai-backend-0y6t.onrender.com";
 
 let chatHistory = JSON.parse(
     localStorage.getItem("codeai_history") || "[]"
