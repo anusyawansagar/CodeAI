@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>CodeAI — Coding Assistant</title>
+
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+<div class="app">
+
+    <!-- SIDEBAR -->
+    <aside class="sidebar">
+
+        <div class="brand">
+
+            <div class="logo">&lt;/&gt;</div>
+
+            <div>
+                <h2>CodeAI</h2>
+                <span>Coding Assistant</span>
+            </div>
+
+        </div>
+
+
+        <button class="new-chat" onclick="newChat()">
+            + New Chat
+        </button>
+
+
+        <div class="sidebar-section">
+
+            <p>LANGUAGE</p>
+
+            <select id="language">
+
+                <option>Python</option>
+                <option>JavaScript</option>
+                <option>HTML</option>
+                <option>CSS</option>
+                <option>C</option>
+                <option>C++</option>
+                <option>Java</option>
+                <option>Rust</option>
+                <option>SQL</option>
+
+            </select>
+
+        </div>
+
+
+        <div class="sidebar-bottom">
+
+            <button>⚙ Settings</button>
+
+            <button>ℹ About CodeAI</button>
+
+        </div>
+
+    </aside>
+
+
+
+    <!-- MAIN CHAT -->
+    <main class="chat">
+
+
+        <!-- TOP BAR -->
+        <header class="topbar">
+
+            <div>
+
+                <h1>CodeAI</h1>
+
+                <p>Your coding learning companion</p>
+
+            </div>
+
+
+            <div class="status">
+
+                <span></span>
+
+                Online
+
+            </div>
+
+        </header>
+
+
+
+        <!-- MESSAGES -->
+        <section id="messages" class="messages">
+
+
+            <div class="welcome">
+
+                <div class="welcome-icon">
+
+                    &lt;/&gt;
+
+                </div>
+
+
+                <h2>Welcome to CodeAI</h2>
+
+
+                <p>
+
+                    Learn programming, understand errors,
+                    debug code and build projects.
+
+                </p>
+
+
+                <div class="suggestions">
+
+
+                    <button onclick="useSuggestion('Explain Python loops')">
+
+                        🐍 Explain Python loops
+
+                    </button>
+
+
+                    <button onclick="useSuggestion('Help me debug my code')">
+
+                        🐛 Debug my code
+
+                    </button>
+
+
+                    <button onclick="useSuggestion('Help me build a Python project')">
+
+                        🛠 Build a project
+
+                    </button>
+
+
+                    <button onclick="useSuggestion('What should I learn in JavaScript?')">
+
+                        📚 Learning path
+
+                    </button>
+
+
+                </div>
+
+            </div>
+
+
+        </section>
+
+
+
+        <!-- INPUT + AD -->
+        <div class="bottom-area">
+
+
+            <div class="input-area">
+
+                <div class="input-box">
+
+
+                    <textarea
+
+                        id="userInput"
+
+                        placeholder="Ask anything about coding..."
+
+                        rows="1"
+
+                        onkeydown="handleKey(event)"
+
+                    ></textarea>
+
+
+                    <button
+
+                        id="sendButton"
+
+                        onclick="sendMessage()"
+
+                    >
+
+                        ➤
+
+                    </button>
+
+
+                </div>
+
+
+                <p class="disclaimer">
+
+                    CodeAI can make mistakes. Always test generated code.
+
+                </p>
+
+            </div>
+
+
+
+            <!-- SMALL AD PLACEHOLDER -->
+
+            <div class="ad-container">
+
+                <span class="ad-label">ADVERTISEMENT</span>
+
+                <div class="ad-box">
+
+                    <p>Advertisement</p>
+
+                </div>
+
+            </div>
+
+
+        </div>
+
+
+    </main>
+
+</div>
+
+
+<script src="script.js"></script>
+
+</body>
+</html>
