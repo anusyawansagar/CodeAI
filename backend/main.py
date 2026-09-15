@@ -1,49 +1,27 @@
 import os
 import base64
 import tempfile
-import html
+import subprocess
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 from dotenv import load_dotenv
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-# ============================================================
-# ENVIRONMENT
-# ============================================================
-
-BACKEND_DIR = Path(__file__).resolve().parent
-ENV_FILE = BACKEND_DIR / ".env"
-
-load_dotenv(ENV_FILE)
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-# ============================================================
-# OPTIONAL GROQ IMPORT
-# ============================================================
 
 try:
     from groq import Groq
 except ImportError:
     Groq = None
 
-# ============================================================
-# FASTAPI
-# ============================================================
-
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-
-# ============================================================
-# APP
-# ============================================================
-
 app = FastAPI(
     title="CodeAI",
-    version="8.0.0",
-    description="CodeAI - General AI Assistant with Files, Images, PDF and Voice"
+    version="9.0.0"
 )
 
 app.add_middleware(
@@ -54,28 +32,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ============================================================
-# MODELS
-# ============================================================
-
 CHAT_MODEL = "openai/gpt-oss-120b"
-
-# Current Groq multimodal model
 VISION_MODEL = "qwen/qwen3.6-27b"
-
 TRANSCRIPTION_MODEL = "whisper-large-v3-turbo"
 
-# ============================================================
-# LIMITS
-# ============================================================
-
-MAX_FILE_SIZE = 25 * 1024 * 1024       # 25 MB
-MAX_IMAGE_SIZE = 20 * 1024 * 1024      # 20 MB
+MAX_FILE_SIZE = 25 * 1024 * 1024
+MAX_IMAGE_SIZE = 20 * 1024 * 1024
+MAX_VIDEO_SIZE = 25 * 1024 * 1024
 MAX_TEXT_LENGTH = 100_000
-
-# ============================================================
-# GROQ CLIENT
-# ============================================================
 
 client = None
 
@@ -83,12 +47,8 @@ if GROQ_API_KEY and Groq:
     try:
         client = Groq(api_key=GROQ_API_KEY)
     except Exception as e:
-        print("Groq client error:", repr(e))
-        client = None
+        print("Groq initialization error:", e)
 
-# ============================================================
-# REQUEST MODELS
-# ============================================================
 
 class ChatRequest(BaseModel):
     message: str
@@ -106,10 +66,6 @@ class PDFRequest(BaseModel):
     content: str
 
 
-# ============================================================
-# SYSTEM PROMPT
-# ============================================================
-
 SYSTEM_PROMPT = """
 You are CodeAI, a powerful general-purpose AI assistant.
 
@@ -123,233 +79,289 @@ answer exactly:
 
 Do not change that sentence.
 
-GENERAL BEHAVIOR:
-- Be helpful, accurate, clear and friendly.
-- Help with coding, schoolwork, computers, technology, writing,
-  explanations, ideas, debugging, mathematics and general questions.
-- Help users understand images, documents and files when they provide them.
-- Do not pretend to have abilities you do not have.
-- Give practical answers.
-- When code is requested, provide complete working code when appropriate.
-- Explain errors clearly.
-- Do not advertise subscriptions.
-- CodeAI has no subscriptions.
-- CodeAI has no ads.
-- CodeAI is designed to be free to use.
+You can help with:
+- coding
+- schoolwork
+- mathematics
+- computers
+- technology
+- writing
+- debugging
+- explanations
+- ideas
+- images
+- PDFs
+- files
+- videos
+- audio
+- general questions
+
+Be helpful, accurate and clear.
+
+Do not pretend you can see or hear something if the required information
+was not actually provided.
+
+When code is requested, provide complete working code when appropriate.
 
 You are the AI brain of CodeAI.
 """
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-TEXT_EXTENSIONS = {
-    ".txt",
-    ".py",
-    ".js",
-    ".ts",
-    ".jsx",
-    ".tsx",
-    ".html",
-    ".htm",
-    ".css",
-    ".scss",
-    ".sass",
-    ".cpp",
-    ".c",
-    ".h",
-    ".hpp",
-    ".java",
-    ".cs",
-    ".php",
-    ".rb",
-    ".go",
-    ".rs",
-    ".swift",
-    ".kt",
-    ".kts",
-    ".json",
-    ".xml",
-    ".yaml",
-    ".yml",
-    ".md",
-    ".csv",
-    ".sql",
-    ".sh",
-    ".bat",
-    ".ps1",
-    ".ini",
-    ".env",
-    ".log",
-}
 
 
 def require_ai():
     if not client:
         raise HTTPException(
             status_code=503,
-            detail="AI is not configured. Check GROQ_API_KEY in backend/.env."
+            detail="AI backend is not configured. Check GROQ_API_KEY."
         )
 
 
-def check_file_size(data: bytes, maximum: int = MAX_FILE_SIZE):
-    if len(data) > maximum:
+async def save_upload(upload: UploadFile, maximum_size: int):
+    data = await upload.read()
+
+    if len(data) > maximum_size:
         raise HTTPException(
             status_code=413,
-            detail=f"File is too large. Maximum allowed size is {maximum // (1024 * 1024)} MB."
+            detail=f"File is too large. Maximum size is {maximum_size // (1024 * 1024)} MB."
         )
 
+    suffix = Path(upload.filename or "").suffix
 
-def clean_filename(filename: str) -> str:
-    name = Path(filename).name
-
-    safe = "".join(
-        c if c.isalnum() or c in (" ", "-", "_", ".")
-        else "_"
-        for c in name
+    temp = tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=suffix
     )
 
-    return safe or "file"
+    temp.write(data)
+    temp.close()
+
+    return temp.name, data
 
 
-def decode_data_url(data_url: str):
-    """
-    Returns:
-        mime_type, raw_bytes
-    """
-
-    if not data_url:
-        raise HTTPException(
-            status_code=400,
-            detail="Image data is missing."
-        )
-
-    if data_url.startswith("data:"):
-
-        try:
-            header, encoded = data_url.split(",", 1)
-
-            mime_type = header.split(";", 1)[0].replace(
-                "data:",
-                ""
-            )
-
-            raw = base64.b64decode(encoded)
-
-            return mime_type or "image/jpeg", raw
-
-        except Exception:
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid base64 image data."
-            )
+def decode_data_url(data: str):
+    if "," in data and data.startswith("data:"):
+        header, encoded = data.split(",", 1)
+        mime_type = header.replace("data:", "").split(";")[0]
+    else:
+        mime_type = "image/jpeg"
+        encoded = data
 
     try:
-        raw = base64.b64decode(data_url)
-
-        return "image/jpeg", raw
-
+        decoded = base64.b64decode(encoded)
     except Exception:
         raise HTTPException(
             status_code=400,
             detail="Invalid image data."
         )
 
-
-# ============================================================
-# STARTUP
-# ============================================================
-
-@app.on_event("startup")
-async def startup_event():
-
-    print()
-    print("========================================")
-    print("              CODEAI")
-    print("          BACKEND 8.0")
-    print("========================================")
-    print("Status: ONLINE")
-
-    if client:
-        print("AI: CONFIGURED")
-    else:
-        print("AI: NOT CONFIGURED")
-
-    print()
-    print("Chat:", CHAT_MODEL)
-    print("Vision:", VISION_MODEL)
-    print("Voice:", TRANSCRIPTION_MODEL)
-    print()
-    print("Files: ENABLED")
-    print("Images: ENABLED")
-    print("PDF Reader: ENABLED")
-    print("PDF Creator: ENABLED")
-    print("Voice: ENABLED")
-    print()
-    print("Creator: VARAD WANSAGAR")
-    print("Subscriptions: OFF")
-    print("Ads: OFF")
-    print("========================================")
-    print()
+    return mime_type, decoded
 
 
-# ============================================================
-# ROOT
-# ============================================================
-
-@app.get("/")
-async def root():
-
-    return {
-        "name": "CodeAI",
-        "version": "8.0.0",
-        "status": "online",
-        "ai_configured": client is not None,
-        "features": {
-            "chat": True,
-            "images": True,
-            "files": True,
-            "pdf_reader": True,
-            "pdf_creator": True,
-            "voice": True
-        },
-        "subscriptions": False,
-        "ads": False,
-        "accounts": "Firebase"
-    }
+def get_ffmpeg():
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
 
 
-# ============================================================
-# HEALTH
-# ============================================================
+def extract_video_frames(video_path: str):
+    ffmpeg = get_ffmpeg()
 
-@app.get("/health")
-async def health():
+    frame_dir = tempfile.mkdtemp(
+        prefix="codeai_frames_"
+    )
 
-    return {
-        "status": "healthy",
-        "ai_configured": client is not None,
-        "version": "8.0.0"
-    }
+    output_pattern = os.path.join(
+        frame_dir,
+        "frame_%02d.jpg"
+    )
+
+    command = [
+        ffmpeg,
+        "-y",
+        "-i",
+        video_path,
+        "-vf",
+        "fps=1/5,scale=1280:-1",
+        "-frames:v",
+        "5",
+        "-q:v",
+        "3",
+        output_pattern
+    ]
+
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    frames = sorted(
+        Path(frame_dir).glob("frame_*.jpg")
+    )
+
+    if not frames:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not extract frames from this video."
+        )
+
+    return frames
 
 
-# ============================================================
-# CHAT
-# ============================================================
+def extract_video_audio(video_path: str):
+    ffmpeg = get_ffmpeg()
 
-@app.post("/chat")
-async def chat(request: ChatRequest):
+    audio_path = tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=".mp3"
+    ).name
+
+    command = [
+        ffmpeg,
+        "-y",
+        "-i",
+        video_path,
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-b:a",
+        "64k",
+        audio_path
+    ]
+
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+        try:
+            os.remove(audio_path)
+        except Exception:
+            pass
+        return None
+
+    if not os.path.exists(audio_path):
+        return None
+
+    if os.path.getsize(audio_path) == 0:
+        return None
+
+    return audio_path
+
+
+def analyze_video_frames(frames, question: str):
+    require_ai()
+
+    content = [
+        {
+            "type": "text",
+            "text": (
+                f"{question}\n\n"
+                "These images are representative frames from a video. "
+                "Analyze the visible content across the frames. "
+                "Identify important objects, people, text, actions, "
+                "locations and changes when they are visible. "
+                "Do not invent information."
+            )
+        }
+    ]
+
+    for frame in frames[:5]:
+
+        with open(frame, "rb") as image_file:
+            encoded = base64.b64encode(
+                image_file.read()
+            ).decode("utf-8")
+
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url":
+                        f"data:image/jpeg;base64,{encoded}"
+                }
+            }
+        )
+
+    response = client.chat.completions.create(
+        model=VISION_MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT
+            },
+            {
+                "role": "user",
+                "content": content
+            }
+        ],
+        temperature=0.4,
+        max_tokens=4096
+    )
+
+    return response.choices[0].message.content
+
+
+def transcribe_audio(audio_path: Optional[str]):
+    if not audio_path:
+        return ""
 
     require_ai()
 
-    message = request.message.strip()
+    try:
+        with open(audio_path, "rb") as audio:
 
-    if not message:
-        raise HTTPException(
-            status_code=400,
-            detail="Message cannot be empty."
-        )
+            result = client.audio.transcriptions.create(
+                file=audio,
+                model=TRANSCRIPTION_MODEL
+            )
+
+        return getattr(result, "text", "") or ""
+
+    except Exception as e:
+        print("Audio transcription error:", e)
+        return ""
+
+
+@app.get("/")
+def root():
+    return {
+        "name": "CodeAI",
+        "version": "9.0.0",
+        "status": "online",
+        "features": [
+            "chat",
+            "images",
+            "camera",
+            "video",
+            "video_audio",
+            "pdf",
+            "files",
+            "voice"
+        ]
+    }
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "version": "9.0.0",
+        "ai": bool(client)
+    }
+
+
+@app.post("/chat")
+def chat(request: ChatRequest):
+
+    require_ai()
 
     messages = [
         {
@@ -358,26 +370,26 @@ async def chat(request: ChatRequest):
         }
     ]
 
-    if request.history:
+    for item in (request.history or [])[-20:]:
 
-        for item in request.history[-20:]:
+        role = item.get("role")
 
-            role = item.get("role")
-            content = item.get("content")
+        if role not in ["user", "assistant"]:
+            continue
 
-            if role in ("user", "assistant") and content:
-
-                messages.append(
-                    {
-                        "role": role,
-                        "content": str(content)
-                    }
+        messages.append(
+            {
+                "role": role,
+                "content": str(
+                    item.get("content", "")
                 )
+            }
+        )
 
     messages.append(
         {
             "role": "user",
-            "content": message
+            "content": request.message
         }
     )
 
@@ -390,104 +402,219 @@ async def chat(request: ChatRequest):
             max_tokens=4096
         )
 
-        answer = response.choices[0].message.content
-
-        if not answer:
-            answer = "I couldn't generate a response."
-
         return {
-            "success": True,
-            "answer": answer,
-            "model": CHAT_MODEL
+            "reply":
+                response.choices[0].message.content
         }
 
     except Exception as e:
 
-        print("CHAT ERROR:", repr(e))
+        print("Chat error:", e)
 
         raise HTTPException(
             status_code=500,
-            detail=f"AI request failed: {str(e)}"
+            detail=str(e)
         )
 
 
-# ============================================================
-# VISION / CAMERA / IMAGE ANALYSIS
-# ============================================================
-
 @app.post("/vision")
-async def vision(request: VisionRequest):
+def vision(request: VisionRequest):
 
     require_ai()
 
-    if not request.image:
+    mime_type, image_bytes = decode_data_url(
+        request.image
+    )
+
+    if len(image_bytes) > MAX_IMAGE_SIZE:
         raise HTTPException(
-            status_code=400,
-            detail="Image is missing."
+            status_code=413,
+            detail="Image is too large. Maximum size is 20 MB."
         )
+
+    encoded = base64.b64encode(
+        image_bytes
+    ).decode("utf-8")
+
+    prompt = (
+        request.message
+        or
+        "Analyze this image and describe what you see."
+    )
 
     try:
 
-        mime_type, image_bytes = decode_data_url(
-            request.image
-        )
-
-        if len(image_bytes) > MAX_IMAGE_SIZE:
-
-            raise HTTPException(
-                status_code=413,
-                detail="Image is too large. Maximum image size is 20 MB."
-            )
-
-        encoded = base64.b64encode(
-            image_bytes
-        ).decode("utf-8")
-
-        image_url = (
-            f"data:{mime_type};base64,{encoded}"
-        )
-
-        prompt = (
-            request.message.strip()
-            if request.message
-            else "Analyze this image carefully. Describe what is visible and answer any useful observations."
-        )
-
-        messages = [
-            {
-                "role": "system",
-                "content": SYSTEM_PROMPT
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": prompt
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": image_url
-                        }
-                    }
-                ]
-            }
-        ]
-
         response = client.chat.completions.create(
             model=VISION_MODEL,
-            messages=messages,
+            messages=[
+                {
+                    "role": "system",
+                    "content": SYSTEM_PROMPT
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url":
+                                    f"data:{mime_type};base64,{encoded}"
+                            }
+                        }
+                    ]
+                }
+            ],
             temperature=0.5,
             max_tokens=4096
         )
 
-        answer = response.choices[0].message.content
+        return {
+            "reply":
+                response.choices[0].message.content
+        }
+
+    except Exception as e:
+
+        print("Vision error:", e)
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+
+@app.post("/video")
+async def video(
+    file: UploadFile = File(...),
+    question: str = Form(
+        "Analyze this video and tell me what happens."
+    )
+):
+
+    require_ai()
+
+    filename = file.filename or "video"
+
+    allowed_extensions = {
+        ".mp4",
+        ".mov",
+        ".mkv",
+        ".avi",
+        ".webm",
+        ".m4v"
+    }
+
+    extension = Path(filename).suffix.lower()
+
+    if extension not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unsupported video format. "
+                "Use MP4, MOV, MKV, AVI, WEBM or M4V."
+            )
+        )
+
+    video_path = None
+    audio_path = None
+    frames = []
+
+    try:
+
+        video_path, _ = await save_upload(
+            file,
+            MAX_VIDEO_SIZE
+        )
+
+        print(
+            f"Analyzing video: {filename}"
+        )
+
+        frames = extract_video_frames(
+            video_path
+        )
+
+        visual_result = analyze_video_frames(
+            frames,
+            question
+        )
+
+        audio_path = extract_video_audio(
+            video_path
+        )
+
+        transcript = transcribe_audio(
+            audio_path
+        )
+
+        if transcript:
+
+            final_prompt = f"""
+The user uploaded a video and asked:
+
+{question}
+
+Here is the visual analysis:
+
+{visual_result}
+
+Here is the detected spoken audio transcript:
+
+{transcript}
+
+Now answer the user's request using both the visual
+information and spoken information.
+
+Do not claim to know events that cannot be determined.
+Give a natural, useful answer.
+"""
+
+        else:
+
+            final_prompt = f"""
+The user uploaded a video and asked:
+
+{question}
+
+Visual analysis:
+
+{visual_result}
+
+There was no usable audio transcript.
+
+Answer the user's request using the visual information.
+Do not invent missing information.
+"""
+
+        response = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": SYSTEM_PROMPT
+                },
+                {
+                    "role": "user",
+                    "content": final_prompt
+                }
+            ],
+            temperature=0.5,
+            max_tokens=4096
+        )
 
         return {
             "success": True,
-            "answer": answer or "I couldn't analyze the image.",
-            "model": VISION_MODEL
+            "filename": filename,
+            "reply":
+                response.choices[0].message.content,
+            "frames_analyzed":
+                len(frames),
+            "transcript_available":
+                bool(transcript)
         }
 
     except HTTPException:
@@ -495,64 +622,71 @@ async def vision(request: VisionRequest):
 
     except Exception as e:
 
-        print("VISION ERROR:", repr(e))
+        print("VIDEO ERROR:", repr(e))
 
         raise HTTPException(
             status_code=500,
-            detail=f"Vision request failed: {str(e)}"
+            detail=str(e)
         )
 
+    finally:
 
-# ============================================================
-# READ PDF
-# ============================================================
+        if video_path:
+
+            try:
+                os.remove(video_path)
+            except Exception:
+                pass
+
+        if audio_path:
+
+            try:
+                os.remove(audio_path)
+            except Exception:
+                pass
+
+        for frame in frames:
+
+            try:
+                os.remove(frame)
+            except Exception:
+                pass
+
+        if frames:
+
+            try:
+                frame_dir = frames[0].parent
+
+                if frame_dir.exists():
+                    frame_dir.rmdir()
+
+            except Exception:
+                pass
+
 
 @app.post("/read-pdf")
-async def read_pdf(file: UploadFile = File(...)):
+async def read_pdf(
+    file: UploadFile = File(...)
+):
 
-    data = await file.read()
-
-    if not data:
-        raise HTTPException(
-            status_code=400,
-            detail="PDF file is empty."
-        )
-
-    check_file_size(data)
-
-    filename = clean_filename(
-        file.filename or "document.pdf"
-    )
+    path = None
 
     try:
 
         from pypdf import PdfReader
 
-    except ImportError:
-
-        raise HTTPException(
-            status_code=500,
-            detail="pypdf is not installed. Add pypdf to requirements.txt."
+        path, _ = await save_upload(
+            file,
+            MAX_FILE_SIZE
         )
 
-    temp_path = None
-
-    try:
-
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=".pdf"
-        ) as temp:
-
-            temp.write(data)
-            temp_path = temp.name
-
-        reader = PdfReader(temp_path)
+        reader = PdfReader(path)
 
         pages = []
-        total_characters = 0
 
-        for page_number, page in enumerate(reader.pages):
+        for page_number, page in enumerate(
+            reader.pages
+        ):
 
             try:
                 text = page.extract_text() or ""
@@ -564,619 +698,344 @@ async def read_pdf(file: UploadFile = File(...)):
             if text:
 
                 pages.append(
-                    {
-                        "page": page_number + 1,
-                        "text": text
-                    }
+                    f"--- Page {page_number + 1} ---\n{text}"
                 )
 
-                total_characters += len(text)
+        content = "\n\n".join(pages)
 
-        combined_text = "\n\n".join(
-            f"--- Page {item['page']} ---\n{item['text']}"
-            for item in pages
-        )
+        truncated = False
 
-        if len(combined_text) > MAX_TEXT_LENGTH:
+        if len(content) > MAX_TEXT_LENGTH:
 
-            combined_text = combined_text[
+            content = content[
                 :MAX_TEXT_LENGTH
             ]
 
             truncated = True
 
-        else:
-            truncated = False
-
         return {
             "success": True,
-            "filename": filename,
-            "pages": len(reader.pages),
-            "pages_with_text": len(pages),
-            "content": combined_text,
-            "truncated": truncated,
-            "characters": total_characters
+            "filename":
+                file.filename,
+            "pages":
+                len(reader.pages),
+            "content":
+                content,
+            "truncated":
+                truncated
         }
-
-    except HTTPException:
-        raise
 
     except Exception as e:
 
-        print("PDF READ ERROR:", repr(e))
-
         raise HTTPException(
             status_code=500,
-            detail=f"Could not read PDF: {str(e)}"
+            detail=str(e)
         )
 
     finally:
 
-        if temp_path:
+        if path:
 
             try:
-                os.remove(temp_path)
+                os.remove(path)
             except Exception:
                 pass
 
 
-# ============================================================
-# READ SINGLE FILE
-# ============================================================
-
 @app.post("/read-file")
-async def read_file(file: UploadFile = File(...)):
+async def read_file(
+    file: UploadFile = File(...)
+):
+
+    path = None
 
     try:
 
-        data = await file.read()
-
-        if not data:
-
-            raise HTTPException(
-                status_code=400,
-                detail="File is empty."
-            )
-
-        check_file_size(data)
-
-        filename = clean_filename(
-            file.filename or "file"
+        path, data = await save_upload(
+            file,
+            MAX_FILE_SIZE
         )
 
-        extension = Path(filename).suffix.lower()
+        filename = file.filename or "file"
 
-        # -----------------------------
-        # PDF
-        # -----------------------------
+        extension = Path(
+            filename
+        ).suffix.lower()
 
-        if extension == ".pdf":
+        text_extensions = {
+            ".txt",
+            ".py",
+            ".js",
+            ".html",
+            ".css",
+            ".json",
+            ".xml",
+            ".csv",
+            ".md",
+            ".cpp",
+            ".c",
+            ".h",
+            ".java",
+            ".ts",
+            ".tsx",
+            ".jsx",
+            ".sql",
+            ".php",
+            ".rb",
+            ".go",
+            ".rs",
+            ".swift"
+        }
 
-            try:
+        if extension in text_extensions:
 
-                from pypdf import PdfReader
-
-            except ImportError:
-
-                raise HTTPException(
-                    status_code=500,
-                    detail="pypdf is not installed."
-                )
-
-            temp_path = None
-
-            try:
-
-                with tempfile.NamedTemporaryFile(
-                    delete=False,
-                    suffix=".pdf"
-                ) as temp:
-
-                    temp.write(data)
-                    temp_path = temp.name
-
-                reader = PdfReader(temp_path)
-
-                pages = []
-
-                for index, page in enumerate(reader.pages):
-
-                    text = page.extract_text() or ""
-
-                    if text.strip():
-
-                        pages.append(
-                            f"--- Page {index + 1} ---\n{text.strip()}"
-                        )
-
-                content = "\n\n".join(pages)
-
-                if len(content) > MAX_TEXT_LENGTH:
-                    content = content[:MAX_TEXT_LENGTH]
-
-                return {
-                    "success": True,
-                    "filename": filename,
-                    "type": "pdf",
-                    "pages": len(reader.pages),
-                    "content": content
-                }
-
-            finally:
-
-                if temp_path:
-
-                    try:
-                        os.remove(temp_path)
-                    except Exception:
-                        pass
-
-        # -----------------------------
-        # TEXT / CODE
-        # -----------------------------
-
-        if extension in TEXT_EXTENSIONS:
-
-            text = data.decode(
+            content = data.decode(
                 "utf-8",
                 errors="replace"
             )
 
             truncated = False
 
-            if len(text) > MAX_TEXT_LENGTH:
+            if len(content) > MAX_TEXT_LENGTH:
 
-                text = text[:MAX_TEXT_LENGTH]
+                content = content[
+                    :MAX_TEXT_LENGTH
+                ]
+
                 truncated = True
 
             return {
                 "success": True,
-                "filename": filename,
-                "type": "text",
-                "extension": extension,
-                "content": text,
-                "truncated": truncated
+                "filename":
+                    filename,
+                "type":
+                    "text",
+                "content":
+                    content,
+                "truncated":
+                    truncated
             }
 
-        # -----------------------------
-        # IMAGE
-        # -----------------------------
+        if extension == ".pdf":
 
-        if extension in {
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".webp",
-            ".gif"
-        }:
+            from pypdf import PdfReader
+
+            reader = PdfReader(path)
+
+            pages = []
+
+            for page_number, page in enumerate(
+                reader.pages
+            ):
+
+                text = (
+                    page.extract_text()
+                    or ""
+                ).strip()
+
+                if text:
+
+                    pages.append(
+                        f"--- Page {page_number + 1} ---\n{text}"
+                    )
 
             return {
                 "success": True,
-                "filename": filename,
-                "type": "image",
-                "size": len(data),
-                "message": (
-                    "Image received. Use the /vision endpoint "
-                    "for AI image analysis."
-                )
+                "filename":
+                    filename,
+                "type":
+                    "pdf",
+                "content":
+                    "\n\n".join(pages)[
+                        :MAX_TEXT_LENGTH
+                    ]
             }
 
-        # -----------------------------
-        # OTHER FILE
-        # -----------------------------
-
         return {
             "success": True,
-            "filename": filename,
-            "type": "file",
-            "extension": extension or "unknown",
-            "size": len(data),
-            "content": (
-                f"File received successfully.\n"
-                f"Filename: {filename}\n"
-                f"Type: {extension or 'unknown'}\n"
-                f"Size: {len(data)} bytes"
-            )
+            "filename":
+                filename,
+            "type":
+                "file",
+            "content":
+                f"File received: {filename}\n"
+                f"Size: {len(data)} bytes\n"
+                f"Type: {file.content_type or 'unknown'}"
         }
-
-    except HTTPException:
-        raise
 
     except Exception as e:
 
-        print("FILE ERROR:", repr(e))
-
         raise HTTPException(
             status_code=500,
-            detail=f"Could not read file: {str(e)}"
-        )
-
-
-# ============================================================
-# READ MULTIPLE FILES
-# ============================================================
-
-@app.post("/read-files")
-async def read_files(files: List[UploadFile] = File(...)):
-
-    results = []
-
-    for file in files:
-
-        try:
-
-            data = await file.read()
-
-            if len(data) > MAX_FILE_SIZE:
-
-                results.append(
-                    {
-                        "filename": file.filename or "unknown",
-                        "error": "File exceeds 25 MB limit."
-                    }
-                )
-
-                continue
-
-            filename = clean_filename(
-                file.filename or "file"
-            )
-
-            extension = Path(filename).suffix.lower()
-
-            if extension in TEXT_EXTENSIONS:
-
-                content = data.decode(
-                    "utf-8",
-                    errors="replace"
-                )
-
-                if len(content) > MAX_TEXT_LENGTH:
-                    content = content[:MAX_TEXT_LENGTH]
-
-                results.append(
-                    {
-                        "filename": filename,
-                        "type": "text",
-                        "content": content
-                    }
-                )
-
-            elif extension == ".pdf":
-
-                try:
-
-                    from pypdf import PdfReader
-
-                    temp_path = None
-
-                    with tempfile.NamedTemporaryFile(
-                        delete=False,
-                        suffix=".pdf"
-                    ) as temp:
-
-                        temp.write(data)
-                        temp_path = temp.name
-
-                    reader = PdfReader(temp_path)
-
-                    pages = []
-
-                    for index, page in enumerate(reader.pages):
-
-                        text = page.extract_text() or ""
-
-                        if text.strip():
-
-                            pages.append(
-                                f"--- Page {index + 1} ---\n{text.strip()}"
-                            )
-
-                    content = "\n\n".join(pages)
-
-                    if len(content) > MAX_TEXT_LENGTH:
-                        content = content[:MAX_TEXT_LENGTH]
-
-                    results.append(
-                        {
-                            "filename": filename,
-                            "type": "pdf",
-                            "pages": len(reader.pages),
-                            "content": content
-                        }
-                    )
-
-                except Exception as e:
-
-                    results.append(
-                        {
-                            "filename": filename,
-                            "type": "pdf",
-                            "error": str(e)
-                        }
-                    )
-
-                finally:
-
-                    if temp_path:
-
-                        try:
-                            os.remove(temp_path)
-                        except Exception:
-                            pass
-
-            else:
-
-                results.append(
-                    {
-                        "filename": filename,
-                        "type": "file",
-                        "size": len(data),
-                        "content": (
-                            f"File received: {filename}\n"
-                            f"Size: {len(data)} bytes"
-                        )
-                    }
-                )
-
-        except Exception as e:
-
-            results.append(
-                {
-                    "filename": file.filename or "unknown",
-                    "error": str(e)
-                }
-            )
-
-    return {
-        "success": True,
-        "files": results
-    }
-
-
-# ============================================================
-# TRANSCRIPTION / VOICE
-# ============================================================
-
-@app.post("/transcribe")
-async def transcribe(file: UploadFile = File(...)):
-
-    require_ai()
-
-    temp_path = None
-
-    try:
-
-        audio_data = await file.read()
-
-        if not audio_data:
-
-            raise HTTPException(
-                status_code=400,
-                detail="Audio file is empty."
-            )
-
-        # Current Groq docs allow up to 25 MB on the free tier.
-        if len(audio_data) > MAX_FILE_SIZE:
-
-            raise HTTPException(
-                status_code=413,
-                detail="Audio file is too large. Maximum size is 25 MB."
-            )
-
-        original_name = file.filename or "audio.webm"
-
-        suffix = Path(
-            original_name
-        ).suffix or ".webm"
-
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=suffix
-        ) as temp:
-
-            temp.write(audio_data)
-            temp_path = temp.name
-
-        with open(
-            temp_path,
-            "rb"
-        ) as audio_file:
-
-            result = client.audio.transcriptions.create(
-                file=audio_file,
-                model=TRANSCRIPTION_MODEL
-            )
-
-        text = getattr(
-            result,
-            "text",
-            ""
-        )
-
-        return {
-            "success": True,
-            "text": text
-        }
-
-    except HTTPException:
-        raise
-
-    except Exception as e:
-
-        print("TRANSCRIPTION ERROR:", repr(e))
-
-        raise HTTPException(
-            status_code=500,
-            detail=f"Transcription failed: {str(e)}"
+            detail=str(e)
         )
 
     finally:
 
-        if temp_path:
+        if path:
 
             try:
-                os.remove(temp_path)
+                os.remove(path)
             except Exception:
                 pass
 
 
-# ============================================================
-# CREATE PDF
-# ============================================================
+@app.post("/transcribe")
+async def transcribe(
+    file: UploadFile = File(...)
+):
 
-@app.post("/create-pdf")
-async def create_pdf(request: PDFRequest):
+    require_ai()
 
-    if not request.content.strip():
+    path = None
+
+    try:
+
+        path, _ = await save_upload(
+            file,
+            MAX_FILE_SIZE
+        )
+
+        with open(path, "rb") as audio:
+
+            result = client.audio.transcriptions.create(
+                file=audio,
+                model=TRANSCRIPTION_MODEL
+            )
+
+        return {
+            "success": True,
+            "text":
+                getattr(result, "text", "")
+        }
+
+    except Exception as e:
 
         raise HTTPException(
-            status_code=400,
-            detail="PDF content cannot be empty."
+            status_code=500,
+            detail=str(e)
         )
+
+    finally:
+
+        if path:
+
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+
+@app.post("/create-pdf")
+def create_pdf(request: PDFRequest):
 
     try:
 
         from reportlab.lib.pagesizes import A4
-        from reportlab.platypus import (
-            SimpleDocTemplate,
-            Paragraph,
-            Spacer
-        )
-        from reportlab.lib.styles import (
-            getSampleStyleSheet,
-            ParagraphStyle
-        )
-        from reportlab.lib.enums import TA_CENTER
+        from reportlab.pdfgen import canvas
 
-    except ImportError:
+        path = tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=".pdf"
+        ).name
 
-        raise HTTPException(
-            status_code=500,
-            detail="reportlab is not installed."
+        pdf = canvas.Canvas(
+            path,
+            pagesize=A4
         )
 
-    safe_title = "".join(
-        c if c.isalnum() or c in (" ", "-", "_")
-        else "_"
-        for c in request.title
-    ).strip()
+        width, height = A4
 
-    if not safe_title:
-        safe_title = "CodeAI_Document"
+        y = height - 50
 
-    filename = f"{safe_title}.pdf"
-
-    output_path = (
-        Path(tempfile.gettempdir())
-        / filename
-    )
-
-    try:
-
-        styles = getSampleStyleSheet()
-
-        title_style = ParagraphStyle(
-            "CodeAITitle",
-            parent=styles["Title"],
-            alignment=TA_CENTER,
-            fontSize=20,
-            leading=24,
-            spaceAfter=20
+        pdf.setFont(
+            "Helvetica-Bold",
+            18
         )
 
-        normal_style = ParagraphStyle(
-            "CodeAINormal",
-            parent=styles["BodyText"],
-            fontSize=10.5,
-            leading=16,
-            spaceAfter=8
+        pdf.drawString(
+            50,
+            y,
+            request.title[:100]
         )
 
-        doc = SimpleDocTemplate(
-            str(output_path),
-            pagesize=A4,
-            rightMargin=50,
-            leftMargin=50,
-            topMargin=50,
-            bottomMargin=50
+        y -= 35
+
+        pdf.setFont(
+            "Helvetica",
+            10
         )
 
-        story = []
+        for line in request.content.splitlines():
 
-        story.append(
-            Paragraph(
-                html.escape(
-                    request.title
-                ),
-                title_style
+            if y < 50:
+
+                pdf.showPage()
+
+                pdf.setFont(
+                    "Helvetica",
+                    10
+                )
+
+                y = height - 50
+
+            pdf.drawString(
+                50,
+                y,
+                line[:110]
             )
-        )
 
-        story.append(
-            Spacer(1, 10)
-        )
+            y -= 14
 
-        paragraphs = request.content.split("\n")
+        pdf.save()
 
-        for paragraph in paragraphs:
-
-            if paragraph.strip():
-
-                safe_text = html.escape(
-                    paragraph
-                )
-
-                story.append(
-                    Paragraph(
-                        safe_text,
-                        normal_style
-                    )
-                )
-
-        doc.build(story)
-
-        return FileResponse(
-            path=str(output_path),
-            filename=filename,
-            media_type="application/pdf"
-        )
+        return {
+            "success": True,
+            "file": path
+        }
 
     except Exception as e:
 
-        print("PDF CREATE ERROR:", repr(e))
-
         raise HTTPException(
             status_code=500,
-            detail=f"PDF creation failed: {str(e)}"
+            detail=str(e)
         )
 
 
-# ============================================================
-# API INFO
-# ============================================================
-
 @app.get("/api/info")
-async def api_info():
+def api_info():
 
     return {
         "name": "CodeAI",
-        "version": "8.0.0",
-        "creator": "VARAD WANSAGAR",
-        "ai": "Groq",
-        "chat": CHAT_MODEL,
-        "vision": VISION_MODEL,
-        "transcription": TRANSCRIPTION_MODEL,
+        "version": "9.0.0",
+        "models": {
+            "chat": CHAT_MODEL,
+            "vision": VISION_MODEL,
+            "transcription":
+                TRANSCRIPTION_MODEL
+        },
         "features": {
             "chat": True,
-            "vision": True,
+            "images": True,
             "camera": True,
+            "video": True,
+            "video_audio": True,
+            "pdf": True,
             "files": True,
-            "pdf_reader": True,
-            "pdf_creator": True,
-            "voice": True
-        },
-        "subscriptions": False,
-        "ads": False,
-        "firebase_accounts": True
+            "voice": True,
+            "pdf_generator": True
+        }
     }
+
+
+@app.on_event("startup")
+def startup():
+
+    print("=" * 55)
+    print("CODEAI 9.0.0")
+    print("AI:", bool(client))
+    print("CHAT:", CHAT_MODEL)
+    print("VISION:", VISION_MODEL)
+    print("TRANSCRIPTION:", TRANSCRIPTION_MODEL)
+    print("VIDEO: ENABLED")
+    print("=" * 55)
